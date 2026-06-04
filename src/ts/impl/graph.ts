@@ -110,7 +110,11 @@ export default class Graph {
     /**
      * Serializes the graph into a JSON string.
      */
-    public toJSON(): string {
+    public toJSON(tolerance = 2.0): string {
+        if (tolerance > 0) {
+            this.simplify(tolerance);
+        }
+
         // 1. 노드별로 고유 ID를 매핑합니다.
         const nodeToIndex = new Map<Node, number>();
         this.nodes.forEach((node, index) => nodeToIndex.set(node, index));
@@ -138,6 +142,205 @@ export default class Graph {
         return JSON.stringify(graphData);
     }
 
+    /**
+     * Simplifies the graph topology by applying the Douglas-Peucker algorithm on curves.
+     */
+    public simplify(tolerance: number): void {
+        if (tolerance <= 0) return;
+
+        // 1. Map each node to its index for easy edge tracking
+        const nodeToIndex = new Map<Node, number>();
+        this.nodes.forEach((node, index) => nodeToIndex.set(node, index));
+
+        const edgeKey = (n1: Node, n2: Node): string => {
+            const i1 = nodeToIndex.get(n1)!;
+            const i2 = nodeToIndex.get(n2)!;
+            return i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`;
+        };
+
+        const visitedEdges = new Set<string>();
+        const paths: Node[][] = [];
+
+        // 2. First pass: extract paths starting from key nodes (degree !== 2)
+        const keyNodes = this.nodes.filter(n => n.neighbors.size !== 2);
+        for (const u of keyNodes) {
+            for (const v of u.neighbors) {
+                const key = edgeKey(u, v);
+                if (visitedEdges.has(key)) continue;
+
+                const path: Node[] = [u, v];
+                visitedEdges.add(key);
+
+                let current = v;
+                let prev = u;
+                while (current.neighbors.size === 2) {
+                    let next: Node | null = null;
+                    for (const nbr of current.neighbors) {
+                        if (nbr !== prev) {
+                            next = nbr;
+                            break;
+                        }
+                    }
+                    if (!next) break;
+
+                    const nextKey = edgeKey(current, next);
+                    if (visitedEdges.has(nextKey)) break;
+
+                    path.push(next);
+                    visitedEdges.add(nextKey);
+
+                    prev = current;
+                    current = next;
+
+                    if (current.neighbors.size !== 2 || current === u) {
+                        break;
+                    }
+                }
+                paths.push(path);
+            }
+        }
+
+        // 3. Second pass: extract isolated loops of degree 2 nodes
+        for (const u of this.nodes) {
+            if (u.neighbors.size === 2) {
+                for (const v of u.neighbors) {
+                    const key = edgeKey(u, v);
+                    if (visitedEdges.has(key)) continue;
+
+                    const path: Node[] = [u, v];
+                    visitedEdges.add(key);
+
+                    let current = v;
+                    let prev = u;
+                    while (true) {
+                        let next: Node | null = null;
+                        for (const nbr of current.neighbors) {
+                            if (nbr !== prev) {
+                                next = nbr;
+                                break;
+                            }
+                        }
+                        if (!next) break;
+
+                        const nextKey = edgeKey(current, next);
+                        if (visitedEdges.has(nextKey)) break;
+
+                        path.push(next);
+                        visitedEdges.add(nextKey);
+
+                        prev = current;
+                        current = next;
+
+                        if (current === u) {
+                            break;
+                        }
+                    }
+                    paths.push(path);
+                }
+            }
+        }
+
+        // 4. For each extracted path, remove all internal edges,
+        // simplify the path with Douglas-Peucker,
+        // and add the simplified edges back.
+        const nodesToRemove = new Set<Node>();
+
+        for (const path of paths) {
+            // Remove old edges along the path
+            for (let i = 0; i < path.length - 1; i++) {
+                const n1 = path[i];
+                const n2 = path[i + 1];
+                n1.neighbors.delete(n2);
+                n2.neighbors.delete(n1);
+            }
+
+            // Simplify the path using Douglas-Peucker
+            const simplifiedPath = this.simplifyPath(path, tolerance);
+
+            // Add new edges for the simplified path
+            for (let i = 0; i < simplifiedPath.length - 1; i++) {
+                const n1 = simplifiedPath[i];
+                const n2 = simplifiedPath[i + 1];
+                if (n1 !== n2) {
+                    n1.neighbors.add(n2);
+                    n2.neighbors.add(n1);
+                }
+            }
+
+            // Collect nodes to remove (nodes that are in path but not in simplifiedPath)
+            const keptNodesSet = new Set(simplifiedPath);
+            for (const node of path) {
+                if (!keptNodesSet.has(node)) {
+                    nodesToRemove.add(node);
+                }
+            }
+        }
+
+        // 5. Update this.nodes and n.adj for all remaining nodes
+        this.nodes = this.nodes.filter(node => !nodesToRemove.has(node));
+        for (const node of this.nodes) {
+            node.adj = Array.from(node.neighbors);
+        }
+    }
+
+    private getSqSegDist(p: Vector, p1: Vector, p2: Vector): number {
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+
+        if (dx !== 0 || dy !== 0) {
+            const t = ((p.x - p1.x) * dx + (p.y - p1.y) * dy) / (dx * dx + dy * dy);
+
+            if (t > 1) {
+                return p.distanceToSquared(p2);
+            } else if (t > 0) {
+                const proj = new Vector(p1.x + t * dx, p1.y + t * dy);
+                return p.distanceToSquared(proj);
+            }
+        }
+
+        return p.distanceToSquared(p1);
+    }
+
+    private simplifyDPStep(nodes: Node[], first: number, last: number, sqTolerance: number, kept: boolean[]): void {
+        let maxSqDist = 0;
+        let index = -1;
+
+        const pFirst = nodes[first].value;
+        const pLast = nodes[last].value;
+
+        for (let i = first + 1; i < last; i++) {
+            const sqDist = this.getSqSegDist(nodes[i].value, pFirst, pLast);
+            if (sqDist > maxSqDist) {
+                index = i;
+                maxSqDist = sqDist;
+            }
+        }
+
+        if (maxSqDist > sqTolerance) {
+            kept[index] = true;
+            this.simplifyDPStep(nodes, first, index, sqTolerance, kept);
+            this.simplifyDPStep(nodes, index, last, sqTolerance, kept);
+        }
+    }
+
+    private simplifyPath(nodes: Node[], tolerance: number): Node[] {
+        if (nodes.length <= 2) return nodes;
+
+        const sqTolerance = tolerance * tolerance;
+        const kept = new Array(nodes.length).fill(false);
+        kept[0] = true;
+        kept[nodes.length - 1] = true;
+
+        this.simplifyDPStep(nodes, 0, nodes.length - 1, sqTolerance, kept);
+
+        const result: Node[] = [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (kept[i]) {
+                result.push(nodes[i]);
+            }
+        }
+        return result;
+    }
 
     /**
      * Remove dangling edges from graph to facilitate polygon finding

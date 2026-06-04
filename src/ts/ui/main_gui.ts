@@ -34,6 +34,7 @@ export default class MainGUI {
     private smallParks: Vector[][] = [];
     private animate: boolean = true;
     private animationSpeed: number = 30;
+    private exportSimplifyTolerance: number = 2.0;
 
     private coastline: WaterGUI;
     private mainRoads: RoadGUI;
@@ -63,6 +64,7 @@ export default class MainGUI {
     constructor(private guiFolder: dat.GUI, private tensorField: TensorField, private closeTensorFolder: () => void) {
         guiFolder.add(this, 'generateEverything');
         guiFolder.add(this, 'exportGraphJSON');
+        guiFolder.add(this, 'exportSimplifyTolerance').min(0).max(10).step(0.1).name('JSON Export Tolerance');
         // guiFolder.add(this, 'simpleBenchMark');
         const animateController = guiFolder.add(this, 'animate');
         guiFolder.add(this, 'animationSpeed');
@@ -193,7 +195,7 @@ export default class MainGUI {
             .concat(this.mainRoads.allStreamlines)
             .concat(this.minorRoads.allStreamlines), this.minorParams.dstep);
         
-        const blob = new Blob([g.toJSON()], {type: "application/json;charset=utf-8"});
+        const blob = new Blob([g.toJSON(this.exportSimplifyTolerance)], {type: "application/json;charset=utf-8"});
         FileSaver.saveAs(blob, "map_graph.json");
     }
 
