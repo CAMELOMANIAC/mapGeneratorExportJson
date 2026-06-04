@@ -108,6 +108,38 @@ export default class Graph {
     }
 
     /**
+     * Serializes the graph into a JSON string.
+     */
+    public toJSON(): string {
+        // 1. 노드별로 고유 ID를 매핑합니다.
+        const nodeToIndex = new Map<Node, number>();
+        this.nodes.forEach((node, index) => nodeToIndex.set(node, index));
+
+        // 2. 그래프 데이터를 구조화합니다.
+        const graphData = {
+            nodes: this.nodes.map(node => ({
+                x: node.value.x,
+                y: node.value.y
+            })),
+            edges: [] as [number, number][]
+        };
+
+        // 3. 인접 노드 정보를 바탕으로 엣지 리스트를 만듭니다.
+        for (let i = 0; i < this.nodes.length; i++) {
+            const node = this.nodes[i];
+            for (const neighbor of node.adj) {
+                const neighborIndex = nodeToIndex.get(neighbor);
+                if (neighborIndex !== undefined && i < neighborIndex) { // 중복 방지
+                    graphData.edges.push([i, neighborIndex]);
+                }
+            }
+        }
+
+        return JSON.stringify(graphData);
+    }
+
+
+    /**
      * Remove dangling edges from graph to facilitate polygon finding
      */
     private deleteDanglingNodes(n: Node, quadtree: d3.Quadtree<Node>) {

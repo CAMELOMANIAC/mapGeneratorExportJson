@@ -1,3 +1,4 @@
+import * as FileSaver from 'file-saver';
 import * as log from 'loglevel';
 import DomainController from './domain_controller';
 import TensorField from '../impl/tensor_field';
@@ -61,6 +62,7 @@ export default class MainGUI {
 
     constructor(private guiFolder: dat.GUI, private tensorField: TensorField, private closeTensorFolder: () => void) {
         guiFolder.add(this, 'generateEverything');
+        guiFolder.add(this, 'exportGraphJSON');
         // guiFolder.add(this, 'simpleBenchMark');
         const animateController = guiFolder.add(this, 'animate');
         guiFolder.add(this, 'animationSpeed');
@@ -184,6 +186,15 @@ export default class MainGUI {
         this.minorRoads.setPostGenerateCallback(() => {
             this.addParks();
         });
+    }
+
+    exportGraphJSON(): void {
+        const g = new Graph(this.majorRoads.allStreamlines
+            .concat(this.mainRoads.allStreamlines)
+            .concat(this.minorRoads.allStreamlines), this.minorParams.dstep);
+        
+        const blob = new Blob([g.toJSON()], {type: "application/json;charset=utf-8"});
+        FileSaver.saveAs(blob, "map_graph.json");
     }
 
     addParks(): void {
