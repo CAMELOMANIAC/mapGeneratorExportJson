@@ -54,6 +54,14 @@ export default class WaterGenerator extends StreamlineGenerator {
         return this._riverSecondaryRoad;
     }
 
+    get generatorOrigin(): Vector {
+        return this.origin;
+    }
+
+    get generatorDimensions(): Vector {
+        return this.worldDimensions;
+    }
+
     createCoast(): void {
         let coastStreamline;
         let seed;

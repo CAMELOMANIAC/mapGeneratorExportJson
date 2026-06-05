@@ -19,6 +19,7 @@ import {DefaultStyle, RoughStyle} from './style';
 import CanvasWrapper from './canvas_wrapper';
 import Buildings, {BuildingModel} from './buildings';
 import PolygonUtil from '../impl/polygon_util';
+import * as simplify from 'simplify-js';
 
 /**
  * Handles Map folder, glues together impl
@@ -191,11 +192,68 @@ export default class MainGUI {
     }
 
     exportGraphJSON(): void {
-        const g = new Graph(this.majorRoads.allStreamlines
-            .concat(this.mainRoads.allStreamlines)
-            .concat(this.minorRoads.allStreamlines), this.minorParams.dstep);
+        const streamlines: Vector[][] = [];
+        const streamlineTypes: string[] = [];
+
+        for (const s of this.mainRoads.allStreamlines) {
+            streamlines.push(s);
+            streamlineTypes.push('main');
+        }
+        for (const s of this.majorRoads.allStreamlines) {
+            streamlines.push(s);
+            streamlineTypes.push('major');
+        }
+        for (const s of this.minorRoads.allStreamlines) {
+            streamlines.push(s);
+            streamlineTypes.push('minor');
+        }
+
+        // Add coastline roads and secondary river road
+        const waterRoads = this.coastline.streamlinesWithSecondaryRoad;
+        for (let i = 0; i < waterRoads.length; i++) {
+            const s = waterRoads[i];
+            streamlines.push(s);
+            if (i === waterRoads.length - 1) {
+                streamlineTypes.push('major'); // River secondary road is major
+            } else {
+                streamlineTypes.push('main');  // Coastline roads are main
+            }
+        }
+
+        const g = new Graph(streamlines, this.minorParams.dstep, false, streamlineTypes);
         
-        const blob = new Blob([g.toJSON(this.exportSimplifyTolerance)], {type: "application/json;charset=utf-8"});
+        const graphData = g.toJSON(this.exportSimplifyTolerance, this.buildings.models);
+
+        // Get world coordinates of water polygons
+        const rawCoastline = this.coastlineWorld;
+        const rawRiver = this.riverPolygonWorld;
+
+        // Generate detailed closed sea polygon using the unsimplified coastline in world space
+        const detailedSea = PolygonUtil.lineRectanglePolygonIntersection(
+            this.waterOrigin,
+            this.waterDimensions,
+            rawCoastline
+        );
+
+        // Shrink the sea polygon by 15 units towards the sea (offsetting the thick line width)
+        // while snapping the other boundaries back to the map edges.
+        const shrunkenSea = PolygonUtil.shrinkSeaPolygon(
+            detailedSea,
+            15,
+            this.waterOrigin,
+            this.waterDimensions
+        );
+
+        // Simplify river polygon if tolerance is set, keep detailed sea polygon as is
+        const river = this.exportSimplifyTolerance > 0 ? simplify(rawRiver, this.exportSimplifyTolerance) : rawRiver;
+
+        // Union the shrunken sea and river polygons into a single seamless water polygon
+        const water = PolygonUtil.unionPolygons(shrunkenSea, river);
+
+        // Add water data in world space
+        graphData.water = water.map((v: Vector) => ({ x: v.x, y: v.y }));
+        
+        const blob = new Blob([JSON.stringify(graphData)], {type: "application/json;charset=utf-8"});
         FileSaver.saveAs(blob, "map_graph.json");
     }
 
@@ -315,6 +373,26 @@ export default class MainGUI {
 
     public get riverPolygon(): Vector[] {
         return this.coastline.river;
+    }
+
+    public get seaPolygonWorld(): Vector[] {
+        return this.coastline.seaPolygonWorld;
+    }
+
+    public get riverPolygonWorld(): Vector[] {
+        return this.coastline.riverWorld;
+    }
+
+    public get coastlineWorld(): Vector[] {
+        return this.coastline.coastlineWorld;
+    }
+
+    public get waterOrigin(): Vector {
+        return this.coastline.originWorld;
+    }
+
+    public get waterDimensions(): Vector {
+        return this.coastline.dimensionsWorld;
     }
 
     public get buildingModels(): BuildingModel[] {

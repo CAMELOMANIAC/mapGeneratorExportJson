@@ -191,10 +191,107 @@ export default class PolygonUtil {
         return PolygonUtil.geometryFactory.createLineString(coords);
     }
 
-    private static polygonToJts(polygon: Vector[]): jsts.geom.Polygon {
-        const geoInput = polygon.map(v => new jsts.geom.Coordinate(v.x, v.y));
-        geoInput.push(geoInput[0]);  // Create loop
-        return PolygonUtil.geometryFactory.createPolygon(PolygonUtil.geometryFactory.createLinearRing(geoInput), []);
+    private static polygonToJts(polygon: {x: number, y: number}[]): jsts.geom.Polygon {
+        const coords: jsts.geom.Coordinate[] = [];
+        for (const v of polygon) {
+            const coord = new jsts.geom.Coordinate(v.x, v.y);
+            if (coords.length === 0 || !coord.equals(coords[coords.length - 1])) {
+                coords.push(coord);
+            }
+        }
+        if (coords.length > 0 && !coords[0].equals(coords[coords.length - 1])) {
+            coords.push(coords[0]);  // Close the loop
+        }
+        // Ensure at least 4 coordinates (3 distinct + 1 closing) for a valid JSTS ring
+        if (coords.length < 4 && coords.length > 0) {
+            while (coords.length < 4) {
+                coords.push(coords[coords.length - 1]);
+            }
+        }
+        return PolygonUtil.geometryFactory.createPolygon(PolygonUtil.geometryFactory.createLinearRing(coords), []);
+    }
+
+    /**
+     * Unions two polygons using JSTS
+     */
+    public static unionPolygons(p1: {x: number, y: number}[], p2: {x: number, y: number}[]): Vector[] {
+        try {
+            let poly1 = PolygonUtil.polygonToJts(p1);
+            let poly2 = PolygonUtil.polygonToJts(p2);
+            
+            // Repair geometries using buffer(0) to resolve self-intersections
+            poly1 = poly1.buffer(0, undefined, undefined) as jsts.geom.Polygon;
+            poly2 = poly2.buffer(0, undefined, undefined) as jsts.geom.Polygon;
+            
+            const union = poly1.union(poly2);
+
+            let resultCoords: any[] = [];
+            if (union.getGeometryType() === "Polygon") {
+                resultCoords = (union as any).getExteriorRing().getCoordinates();
+            } else if (union.getGeometryType() === "MultiPolygon") {
+                const numGeom = union.getNumGeometries();
+                let maxArea = 0;
+                let mainPoly = null;
+                for (let k = 0; k < numGeom; k++) {
+                    const poly = (union as any).getGeometryN(k);
+                    const area = poly.getArea();
+                    if (area > maxArea) {
+                        maxArea = area;
+                        mainPoly = poly;
+                    }
+                }
+                if (mainPoly) {
+                    resultCoords = (mainPoly as any).getExteriorRing().getCoordinates();
+                }
+            } else {
+                resultCoords = union.getCoordinates();
+            }
+
+            return resultCoords.map((c: any) => new Vector(c.x, c.y));
+        } catch (e) {
+            log.error("Failed to union polygons", e);
+            // Fallback: concatenate
+            return p1.concat(p2).map((v: any) => new Vector(v.x, v.y));
+        }
+    }
+
+    /**
+     * Shrinks the sea polygon while snapping boundary vertices back to map edges
+     */
+    public static shrinkSeaPolygon(polygon: Vector[], spacing: number, origin: Vector, dimensions: Vector): Vector[] {
+        try {
+            const jtsPoly = PolygonUtil.polygonToJts(polygon);
+            const shrunken = jtsPoly.buffer(-spacing, undefined, undefined);
+
+            let coords: any[] = [];
+            if (shrunken.getGeometryType() === "Polygon") {
+                coords = (shrunken as any).getExteriorRing().getCoordinates();
+            } else {
+                coords = shrunken.getCoordinates();
+            }
+
+            const xMin = origin.x;
+            const yMin = origin.y;
+            const xMax = origin.x + dimensions.x;
+            const yMax = origin.y + dimensions.y;
+            const threshold = spacing * 1.5; // e.g. 22.5
+
+            return coords.map((c: any) => {
+                let x = c.x;
+                let y = c.y;
+
+                if (Math.abs(x - xMin) < threshold) x = xMin;
+                else if (Math.abs(x - xMax) < threshold) x = xMax;
+
+                if (Math.abs(y - yMin) < threshold) y = yMin;
+                else if (Math.abs(y - yMax) < threshold) y = yMax;
+
+                return new Vector(x, y);
+            });
+        } catch (e) {
+            log.error("Failed to shrink sea polygon", e);
+            return polygon;
+        }
     }
 
     /**

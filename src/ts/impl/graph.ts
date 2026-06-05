@@ -21,10 +21,17 @@ interface Intersection {
     segments: Segment[];
 }
 
+interface ExportBuilding {
+    height: number;
+    lotWorld: Vector[];
+}
+
 /**
  * Node located along any intersection or point along the simplified road polylines 
  */
 export class Node {
+    private static nextId = 0;
+    public id = Node.nextId++;
     public segments = new Set<Segment>();
     public adj: Node[];
 
@@ -45,12 +52,17 @@ export class Node {
 export default class Graph {
     public nodes: Node[];
     public intersections: Vector[];
+    public edgeTypes = new Map<string, string>();
+
+    public getEdgeKey(n1: Node, n2: Node): string {
+        return n1.id < n2.id ? `${n1.id}_${n2.id}` : `${n2.id}_${n1.id}`;
+    }
 
     /**
      * Create a graph from a set of streamlines
      * Finds all intersections, and creates a list of Nodes
      */
-    constructor(streamlines: Vector[][], dstep: number, deleteDangling=false) {
+    constructor(streamlines: Vector[][], dstep: number, deleteDangling=false, streamlineTypes?: string[]) {
         const intersections = isect.bush(this.streamlinesToSegment(streamlines)).run();
         const quadtree = (d3.quadtree() as d3.Quadtree<Node>).x(n => n.value.x).y(n => n.value.y);
         const nodeAddRadius = 0.001;
@@ -79,14 +91,19 @@ export default class Graph {
         }
 
         // For each simplified streamline, build list of nodes in order along streamline
-        for (const streamline of streamlines) {
+        for (let sIdx = 0; sIdx < streamlines.length; sIdx++) {
+            const streamline = streamlines[sIdx];
+            const type = streamlineTypes ? streamlineTypes[sIdx] : 'minor';
             for (let i = 0; i < streamline.length - 1; i++) {
                 const nodesAlongSegment =
                     this.getNodesAlongSegment(this.vectorsToSegment(streamline[i], streamline[i + 1]), quadtree, nodeAddRadius, dstep);
                 
                 if (nodesAlongSegment.length > 1) {
                     for (let j = 0; j < nodesAlongSegment.length - 1; j++) {
-                        nodesAlongSegment[j].addNeighbor(nodesAlongSegment[j+1]);
+                        const n1 = nodesAlongSegment[j];
+                        const n2 = nodesAlongSegment[j+1];
+                        n1.addNeighbor(n2);
+                        this.edgeTypes.set(this.getEdgeKey(n1, n2), type);
                     }
                 } else {
                     log.error("Error Graph.js: segment with less than 2 nodes");
@@ -108,9 +125,9 @@ export default class Graph {
     }
 
     /**
-     * Serializes the graph into a JSON string.
+     * Serializes the graph, including road types and optional building POIs.
      */
-    public toJSON(tolerance = 2.0): string {
+    public toJSON(tolerance = 2.0, buildings?: ExportBuilding[]): any {
         if (tolerance > 0) {
             this.simplify(tolerance);
         }
@@ -119,27 +136,70 @@ export default class Graph {
         const nodeToIndex = new Map<Node, number>();
         this.nodes.forEach((node, index) => nodeToIndex.set(node, index));
 
-        // 2. 그래프 데이터를 구조화합니다.
+        // 2. 건물 데이터 매핑
+        const buildingsData = [];
+        if (buildings) {
+            for (let i = 0; i < buildings.length; i++) {
+                const b = buildings[i];
+                let cx = 0;
+                let cy = 0;
+                for (const v of b.lotWorld) {
+                    cx += v.x;
+                    cy += v.y;
+                }
+                cx /= b.lotWorld.length;
+                cy /= b.lotWorld.length;
+
+                let closestNodeIdx = 0;
+                let minSqDist = Infinity;
+                for (let j = 0; j < this.nodes.length; j++) {
+                    const nodeVal = this.nodes[j].value;
+                    const dx = nodeVal.x - cx;
+                    const dy = nodeVal.y - cy;
+                    const sqDist = dx * dx + dy * dy;
+                    if (sqDist < minSqDist) {
+                        minSqDist = sqDist;
+                        closestNodeIdx = j;
+                    }
+                }
+
+                buildingsData.push({
+                    id: i,
+                    height: b.height,
+                    coordinates: b.lotWorld.map(v => ({ x: v.x, y: v.y })),
+                    roadNodeId: closestNodeIdx
+                });
+            }
+        }
+
+        // 3. 그래프 데이터를 구조화합니다.
         const graphData = {
             nodes: this.nodes.map(node => ({
                 x: node.value.x,
                 y: node.value.y
             })),
-            edges: [] as [number, number][]
+            edges: [] as { source: number; target: number; type: string }[],
+            buildings: buildingsData
         };
 
-        // 3. 인접 노드 정보를 바탕으로 엣지 리스트를 만듭니다.
+        // 4. 인접 노드 정보를 바탕으로 엣지 리스트를 만듭니다.
         for (let i = 0; i < this.nodes.length; i++) {
             const node = this.nodes[i];
             for (const neighbor of node.adj) {
                 const neighborIndex = nodeToIndex.get(neighbor);
                 if (neighborIndex !== undefined && i < neighborIndex) { // 중복 방지
-                    graphData.edges.push([i, neighborIndex]);
+                    const key = this.getEdgeKey(node, neighbor);
+                    const type = this.edgeTypes.get(key) || 'minor';
+                    graphData.edges.push({
+                        source: i,
+                        target: neighborIndex,
+                        type: type
+                    });
                 }
             }
         }
 
-        return JSON.stringify(graphData);
+        return graphData;
     }
 
     /**
@@ -148,24 +208,14 @@ export default class Graph {
     public simplify(tolerance: number): void {
         if (tolerance <= 0) return;
 
-        // 1. Map each node to its index for easy edge tracking
-        const nodeToIndex = new Map<Node, number>();
-        this.nodes.forEach((node, index) => nodeToIndex.set(node, index));
-
-        const edgeKey = (n1: Node, n2: Node): string => {
-            const i1 = nodeToIndex.get(n1)!;
-            const i2 = nodeToIndex.get(n2)!;
-            return i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`;
-        };
-
         const visitedEdges = new Set<string>();
         const paths: Node[][] = [];
 
-        // 2. First pass: extract paths starting from key nodes (degree !== 2)
+        // 1. First pass: extract paths starting from key nodes (degree !== 2)
         const keyNodes = this.nodes.filter(n => n.neighbors.size !== 2);
         for (const u of keyNodes) {
             for (const v of u.neighbors) {
-                const key = edgeKey(u, v);
+                const key = this.getEdgeKey(u, v);
                 if (visitedEdges.has(key)) continue;
 
                 const path: Node[] = [u, v];
@@ -183,7 +233,7 @@ export default class Graph {
                     }
                     if (!next) break;
 
-                    const nextKey = edgeKey(current, next);
+                    const nextKey = this.getEdgeKey(current, next);
                     if (visitedEdges.has(nextKey)) break;
 
                     path.push(next);
@@ -200,11 +250,11 @@ export default class Graph {
             }
         }
 
-        // 3. Second pass: extract isolated loops of degree 2 nodes
+        // 2. Second pass: extract isolated loops of degree 2 nodes
         for (const u of this.nodes) {
             if (u.neighbors.size === 2) {
                 for (const v of u.neighbors) {
-                    const key = edgeKey(u, v);
+                    const key = this.getEdgeKey(u, v);
                     if (visitedEdges.has(key)) continue;
 
                     const path: Node[] = [u, v];
@@ -222,7 +272,7 @@ export default class Graph {
                         }
                         if (!next) break;
 
-                        const nextKey = edgeKey(current, next);
+                        const nextKey = this.getEdgeKey(current, next);
                         if (visitedEdges.has(nextKey)) break;
 
                         path.push(next);
@@ -240,18 +290,22 @@ export default class Graph {
             }
         }
 
-        // 4. For each extracted path, remove all internal edges,
+        // 3. For each extracted path, remove all internal edges,
         // simplify the path with Douglas-Peucker,
         // and add the simplified edges back.
         const nodesToRemove = new Set<Node>();
 
         for (const path of paths) {
+            // Get original path type
+            const pathType = this.edgeTypes.get(this.getEdgeKey(path[0], path[1])) || 'minor';
+
             // Remove old edges along the path
             for (let i = 0; i < path.length - 1; i++) {
                 const n1 = path[i];
                 const n2 = path[i + 1];
                 n1.neighbors.delete(n2);
                 n2.neighbors.delete(n1);
+                this.edgeTypes.delete(this.getEdgeKey(n1, n2));
             }
 
             // Simplify the path using Douglas-Peucker
@@ -264,6 +318,7 @@ export default class Graph {
                 if (n1 !== n2) {
                     n1.neighbors.add(n2);
                     n2.neighbors.add(n1);
+                    this.edgeTypes.set(this.getEdgeKey(n1, n2), pathType);
                 }
             }
 
@@ -276,7 +331,7 @@ export default class Graph {
             }
         }
 
-        // 5. Update this.nodes and n.adj for all remaining nodes
+        // 4. Update this.nodes and n.adj for all remaining nodes
         this.nodes = this.nodes.filter(node => !nodesToRemove.has(node));
         for (const node of this.nodes) {
             node.adj = Array.from(node.neighbors);
